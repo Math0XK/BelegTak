@@ -312,6 +312,7 @@ class BoardTest implements Comparator<Point>{
 
 	@Test
 	void pathExists(){
+		placeNotPath();
 		simpleStraightPaths();
 		simpleLShapePaths();
 		simpleOShapePaths();
@@ -322,6 +323,29 @@ class BoardTest implements Comparator<Point>{
 		multiColorPath();
 		pathWithMoves();
 		doublePath();
+	}
+
+	private void placeNotPath(){
+		for(Board.Size size: Board.Size.values()){
+			Board board = new Board(size);
+			Piece[] players = new Piece[]{Piece.DOLMEN_WHITE, Piece.DOLMEN_BLACK};
+			final int mid = board.getSize() >> 1;
+			final int end = board.getSize() - 1;
+
+			for(Piece player : players){
+				board.reset();
+				pathPlace(board, players, player, 0, 0, "place at 0,0");
+
+				board.reset();
+				pathPlace(board, players, player, mid, mid, "place at mid,mid");
+
+				board.reset();
+				pathPlace(board, players, player, end, end, "place at end,end");
+
+				board.reset();
+				pathPlace(board, players, player, 0, end, "place at 0,end");
+			}
+		}
 	}
 
 	private void pathWithMoves(){
@@ -925,21 +949,6 @@ class BoardTest implements Comparator<Point>{
 		}
 		for(Piece player: players)
 			assertFalse(board.pathExists(p, player.color), "Player "+player.color+" for "+mode+" at row " + row+" col "+col);
-	}
-
-	private static void display(Board board){// FIXME remove
-		System.out.println("New board");
-		for(int c=0; c<board.getSize(); c++) System.out.print("--");System.out.println("--");
-		for(int r=0; r<board.getSize(); r++){
-			System.out.print("|");
-			for(int c=0; c<board.getSize(); c++){
-				final Piece p = board.getTop(r,c);
-				System.out.print(p == null ? " ": (p.isBlack()?"X":"O"));
-				System.out.print("|");
-			}
-			System.out.println("");
-			for(int c=0; c<board.getSize(); c++) System.out.print("--");System.out.println("--");
-		}
 	}
 
 	private static void placeStack(Board board, Point pos, Stack<Piece> stack){

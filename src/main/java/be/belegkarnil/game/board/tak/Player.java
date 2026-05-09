@@ -174,7 +174,7 @@ public class Player implements Externalizable{
 	 * @return true iff the player has at least one {@link Piece}
 	 */
 	public boolean hasPieces(){
-		return this.stones>0 && this.capstones >0;
+		return this.stones>0 || this.capstones >0;
 	}
 
 	/**
