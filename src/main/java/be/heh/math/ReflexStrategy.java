@@ -51,6 +51,9 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
     private Action [][] killerMoves; // Pour stocker des moves suceptibles d'être bons à chaque profondeur (pour optimisation alpha-beta)
 
+    private TTEntry[] tt;
+    private int ttMask;
+
     public ReflexStrategy() {
     }
 
@@ -98,7 +101,12 @@ public class ReflexStrategy implements Strategy, RoundListener {
     private Action chooseAction(Board board, Player myself, Player opponent, int maxDepth) {
 
         List<Action> legal = MoveGenerator.generateLegal(board, myself, opponent, false);
-        killerMoves = new Action[MAX_DEPTH + 1][];
+        killerMoves = new Action[MAX_DEPTH + 2][2];
+
+        if (tt == null) {
+            tt = new TTEntry[1 << 20];
+            ttMask = (1 << 20) - 1;
+        }
 
         if(legal.isEmpty()) return new Action();
 
@@ -117,7 +125,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
             int beta = Integer.MAX_VALUE;
             boolean completedDepth = true;
 
-            List<Action> ordered = new ArrayList<>(legal);
+            List<Action> ordered = orderWithKillersAndTT(legal, depth, null);
             int prevBestIdx = ordered.indexOf(bestAction);
 
             if (prevBestIdx > 0) {
@@ -156,11 +164,11 @@ public class ReflexStrategy implements Strategy, RoundListener {
                 if(score > alpha) {
                     alpha = score;
                 }
-                if(completedDepth && depthBest != null) {
-                    bestAction = depthBest;
-                }
                 if(timeUp) break;
                 if(depthBestScore >= WIN_REWARD / 2) break; // Early stop if we find a very good move
+            }
+            if(completedDepth && depthBest != null) {
+                bestAction = depthBest;
             }
         }
         return bestAction;
@@ -171,8 +179,30 @@ public class ReflexStrategy implements Strategy, RoundListener {
                             int myStones, int myCaps, 
                             int oppStones, int oppCaps,
                             long deadline) {
-        if (depth == 0) {
+
+        if(timeUp()) {
+            timeUp = true;
             return Evaluator.evaluate(sim, myColor);
+        }
+
+        long hash = hashPosition(sim, maximizing, myStones, myCaps, oppStones, oppCaps);
+        int ttIndex = (int) (hash & ttMask);
+        TTEntry entry = tt[ttIndex];
+        Action ttMove = null;
+        int originalAlpha = alpha;
+        if (entry != null && entry.hash == hash) {
+            ttMove = entry.bestMove;
+            if (entry.depth >= depth) {
+                if (entry.type == Bound.TYPE_EXACT) return entry.value;
+                if (entry.type == Bound.TYPE_LOWER && entry.value >= beta) return entry.value;
+                if (entry.type == Bound.TYPE_UPPER && entry.value <= alpha) return entry.value;
+            }
+        }
+
+        if (depth <= 0) {
+            int value = Evaluator.evaluate(sim, myColor);
+            storeTT(ttIndex, hash, value, depth, Bound.TYPE_EXACT, ttMove);
+            return value;
         }
 
         Color currentPlayer = maximizing ? myColor : oppColor;
@@ -182,14 +212,30 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
         List<Action> legal = MoveGenerator.generateLegal(sim, currentPlayer, currentStones, currentCaps, opponentPlayer, false);
         if (legal.isEmpty() || System.currentTimeMillis() > deadline) return Evaluator.evaluate(sim, myColor);
+        
+        List<Action> ordered = orderWithKillersAndTT(legal, depth, ttMove);
+        Action bestLocalAction = null;
 
         if(maximizing) {
             int value = Integer.MIN_VALUE;
-            for (Action a : legal) {
+            for (Action a : ordered) {
+                if(timeUp()) {
+                    timeUp = true;
+                    break;
+                }
+
                 BoardState next = new BoardState(sim);
                 Color winnerAfterA = MoveApplier.apply(next, a);
-                if(winnerAfterA == myColor) return WIN_REWARD - (MAX_DEPTH - depth);
-                if(winnerAfterA == oppColor) continue;
+                if(winnerAfterA == myColor) {
+                    int win = WIN_REWARD - (MAX_DEPTH - depth);
+                    storeTT(ttIndex, hash, win, depth, Bound.TYPE_EXACT, a);
+                    return win;
+                }
+                if(winnerAfterA == oppColor) {
+                    int loss = LOSS_PENALTY + (MAX_DEPTH - depth);
+                    storeTT(ttIndex, hash, loss, depth, Bound.TYPE_EXACT, a);
+                    continue;
+                };
 
                 int nMyS = myStones, nMyC = myCaps;
                 if(a.isPlace()) {
@@ -199,19 +245,42 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
                 int childValue = alphaBeta(next, depth - 1, alpha, beta, false, myColor, oppColor, nMyS, nMyC, oppStones, oppCaps, deadline);
                 
-                if(childValue > value) value = childValue;
+                if(childValue > value) {
+                    value = childValue;
+                    bestLocalAction = a;
+                }
                 if(value > alpha) alpha = value;
-                if(alpha >= beta) break; // beta cut-off
+                if(alpha >= beta) {
+                    storeKiller(depth, a); // Stocker ce move comme "killer" pour cette profondeur
+                    break; // beta cut-off
+                }
             }
+            
+            byte type = Bound.TYPE_EXACT;
+            if (value <= originalAlpha) type = Bound.TYPE_UPPER;
+            else if (value >= beta) type = Bound.TYPE_LOWER;
+            storeTT(ttIndex, hash, value, depth, type, bestLocalAction);
             return value;
         }
         else {
             int value = Integer.MAX_VALUE;
-            for (Action a : legal) {
+            for (Action a : ordered) {
+                if(timeUp()) {
+                    timeUp = true;
+                    break;
+                }
                 BoardState next = new BoardState(sim);
                 Color winnerAfterA = MoveApplier.apply(next, a);
-                if(winnerAfterA == oppColor) return LOSS_PENALTY + (MAX_DEPTH - depth);
-                if(winnerAfterA == myColor) continue;
+                if(winnerAfterA == oppColor) {
+                    int loss = LOSS_PENALTY + (MAX_DEPTH - depth);
+                    storeTT(ttIndex, hash, loss, depth, Bound.TYPE_EXACT, a);
+                    return loss; 
+                }
+                if(winnerAfterA == myColor) {
+                    int win = WIN_REWARD - (MAX_DEPTH - depth);
+                    storeTT(ttIndex, hash, win, depth, Bound.TYPE_EXACT, a);
+                    continue;
+                }
 
                 int nOppS = oppStones, nOppC = oppCaps;
                 if(a.isPlace()) {
@@ -221,42 +290,117 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
                 int childValue = alphaBeta(next, depth - 1, alpha, beta, true, myColor, oppColor, myStones, myCaps, nOppS, nOppC, deadline);
                 
-                if(childValue < value) value = childValue;
+                if(childValue < value) {
+                    value = childValue;
+                    bestLocalAction = a;
+                }
                 if(value < beta) beta = value;
-                if(alpha >= beta) break; // alpha cut-off
+                if(alpha >= beta) {
+                    storeKiller(depth, a); // Stocker ce move comme "killer" pour cette profondeur
+                    break; // alpha cut-off
+                }
             }
+            
+            byte type = Bound.TYPE_EXACT;
+            if (value <= originalAlpha) type = Bound.TYPE_UPPER;
+            else if (value >= beta) type = Bound.TYPE_LOWER;
+            storeTT(ttIndex, hash, value, depth, type, bestLocalAction);
             return value;
         }
     }
 
     private void storeKiller(int depth, Action a) {
-        if (killerMoves[depth][0] == a) return; // Already stored as best move for this depth
+        if (sameAction(killerMoves[depth][0], a)) return; // Already stored as best move for this depth
         else {
             killerMoves[depth][1] = killerMoves[depth][0]; // Demote previous best to second-best
             killerMoves[depth][0] = a; // Store new best move for this depth
         }
     }
 
-    private List<Action> orderWithKillers(List<Action> legal, int depth) {
+    private List<Action> orderWithKillersAndTT(List<Action> legal, int depth, Action ttMove) {
         Action k0 = (depth >= 0 && depth < killerMoves.length) ? killerMoves[depth][0] : null;
         Action k1 = (depth >= 0 && depth < killerMoves.length) ? killerMoves[depth][1] : null;
         
         if(k0 == null && k1 == null) return legal; // No killer moves for this depth, return original order
 
-        List<Action> head = new ArrayList<>();
-        List<Action> tail = new ArrayList<>();
+        boolean foundTT = false, foundK0 = false, foundK1 = false;
+        List<Action> head = new ArrayList<>(2);
+        List<Action> tail = new ArrayList<>(legal.size());
 
         for(Action a : legal) {
-            if(a == k0 && head.get(0) != k0) head.set(0, a);
-            else if(a == k1 && head.get(0) != k1) {
-                if(head.get(0) != k0) head.set(0, a);
-                else head.set(1, a);
+            if(!foundTT && ttMove != null && sameAction(a, ttMove)) {
+                head.add(a);
+                foundTT = true;
+            }
+            else if(!foundK0 && k0 != null && sameAction(a, k0)) {
+                if(!foundTT || !sameAction(ttMove, a)) {
+                    head.add(a);
+                    foundK0 = true;
+                }
+            }
+            else if(!foundK1 && k1 != null && sameAction(a, k1)) {
+                if(!foundTT || !sameAction(ttMove, a)) {
+                    head.add(a);
+                    foundK1 = true;
+                }
             }
             else tail.add(a);
         }
-
         head.addAll(tail);
         return head;
+    }
+
+    private boolean sameAction(Action a1, Action a2) {
+        if(a1 == null && a2 == null) return true;
+        if(a1 == null || a2 == null) return false;
+        if(a1.isSkip() && a2.isSkip()) return true;
+        if(a1.isPlace() && a2.isPlace()) {
+            return a1.piece == a2.piece && a1.position.equals(a2.position);
+        }
+        if(a1.isMove() && a2.isMove()) {
+            return a1.piece == a2.piece && a1.position.equals(a2.position)
+                    && a1.destination.equals(a2.destination) && Arrays.equals(a1.getAmount(), a2.getAmount());
+        }
+        return false;
+    }
+
+    private void storeTT(int index, long hash, int value, int depth, byte type, Action bestMove) {
+        TTEntry entry = tt[index];
+        if (entry == null) {
+            entry = new TTEntry();
+            tt[index] = entry;
+        } else if (entry.hash != hash && entry.depth > depth) {
+            return;
+        }
+        entry.hash = hash;
+        entry.value = value;
+        entry.depth = depth;
+        entry.type = type;
+        entry.bestMove = bestMove;
+    }
+
+    private long hashPosition(BoardState state, boolean maximizing,
+                              int myStones, int myCaps, int oppStones, int oppCaps) {
+        long hash = state.hash();
+        hash ^= maximizing ? 0x9E3779B97F4A7C15L : 0xC2B2AE3D27D4EB4FL;
+        hash = mix(hash ^ myStones);
+        hash = mix(hash ^ ((long) myCaps << 8));
+        hash = mix(hash ^ ((long) oppStones << 16));
+        hash = mix(hash ^ ((long) oppCaps << 24));
+        return hash;
+    }
+
+    private long mix(long value) {
+        value ^= value >>> 33;
+        value *= 0xff51afd7ed558ccdL;
+        value ^= value >>> 33;
+        value *= 0xc4ceb9fe1a85ec53L;
+        value ^= value >>> 33;
+        return value;
+    }
+
+    private boolean timeUp() {
+        return System.currentTimeMillis() >= deadline;
     }
 
     @Override
@@ -272,9 +416,24 @@ public class ReflexStrategy implements Strategy, RoundListener {
     @Override
     public void onRoundBegins(RoundEvent event) {
         firstAction = true;
+        tt = null;
     }
 
     @Override
     public void onRoundEnds(RoundEvent event) {
+    }
+
+    private static final class TTEntry {
+        long hash;
+        int value;
+        int depth;
+        byte type;
+        Action bestMove;
+    }
+
+    private static final class Bound {
+        static final byte TYPE_EXACT = 0;
+        static final byte TYPE_LOWER = 1;
+        static final byte TYPE_UPPER = 2;
     }
 }

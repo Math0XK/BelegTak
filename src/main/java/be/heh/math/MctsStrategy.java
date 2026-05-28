@@ -9,6 +9,7 @@ import be.belegkarnil.game.board.tak.Player;
 import be.belegkarnil.game.board.tak.event.RoundEvent;
 import be.belegkarnil.game.board.tak.event.RoundListener;
 import be.belegkarnil.game.board.tak.strategy.Strategy;
+import be.heh.math.core.eval.Evaluator;
 import be.heh.math.core.move.MoveApplier;
 import be.heh.math.core.move.MoveGenerator;
 import be.heh.math.core.state.BoardState;
@@ -16,7 +17,7 @@ import be.heh.math.core.state.BoardState;
 import java.awt.Color;
 import java.awt.Point;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 
@@ -58,6 +59,12 @@ public class MctsStrategy implements Strategy, RoundListener {
     public static double PW_C = 1.5;
     /** Profondeur max d'un rollout (évite les boucles longues sur partie non terminale). */
     public static int MAX_ROLLOUT_DEPTH = 80;
+    public static double ROLLOUT_RANDOMNESS = 0.12;
+    public static int ROLLOUT_CANDIDATES = 18;
+
+    private static final int WIN_SCORE = 1_000_000;
+    private static final int BLOCK_SCORE = 250_000;
+    private static final int ROAD_WEIGHT = 1_200;
 
     // ========================================================================
     // ÉTAT
@@ -90,8 +97,28 @@ public class MctsStrategy implements Strategy, RoundListener {
 
         // ----- Construction de la racine : tree reuse OU fresh -----
         MctsNode root = tryReuseRoot(board);
-        if (root == null) {
+        if (root == null || root.toMove != myColor) {
             root = buildFreshRoot(board, myself, opponent, myColor);
+        }
+
+        List<Action> rootActions = generateActionsFor(root);
+        if (rootActions.isEmpty()) {
+            resetTree();
+            return new Action();
+        }
+
+        Action winNow = findWinningAction(root.state, rootActions, myColor);
+        if (winNow != null) {
+            resetTree();
+            return winNow;
+        }
+
+        Action urgentBlock = findBlockingAction(root.state, rootActions, myColor, oppColor,
+                root.blackStones, root.blackCapstones, root.whiteStones, root.whiteCapstones);
+        if (urgentBlock != null) {
+            lastRoot = root;
+            lastOurAction = urgentBlock;
+            return urgentBlock;
         }
 
         // ----- Boucle MCTS sous budget temps -----
@@ -105,7 +132,7 @@ public class MctsStrategy implements Strategy, RoundListener {
         }
 
         // ----- Choix du coup : enfant le plus visité -----
-        MctsNode best = mostVisitedChild(root);
+        MctsNode best = bestRootChild(root);
         if (best == null) {
             // Aucun enfant exploré (budget trop court ou aucune action légale)
             if (root.untriedActions != null && !root.untriedActions.isEmpty()) {
@@ -130,8 +157,7 @@ public class MctsStrategy implements Strategy, RoundListener {
     private MctsNode treePolicy(MctsNode node) {
         while (!isTerminal(node)) {
             if (node.untriedActions == null) {
-                node.untriedActions = generateActionsFor(node);
-                Collections.shuffle(node.untriedActions, random);
+                node.untriedActions = orderedActionsFor(node);
             }
             // Progressive widening : combien d'enfants autorisés à ce nombre de visites ?
             int allowed = (int) Math.ceil(PW_C * Math.sqrt(node.visits + 1.0));
@@ -145,7 +171,7 @@ public class MctsStrategy implements Strategy, RoundListener {
     }
 
     private MctsNode expand(MctsNode parent) {
-        Action action = parent.untriedActions.remove(parent.untriedActions.size() - 1);
+        Action action = parent.untriedActions.remove(0);
         return makeChild(parent, action);
     }
 
@@ -212,7 +238,7 @@ public class MctsStrategy implements Strategy, RoundListener {
             if (legal.isEmpty()) {
                 return tiebreak(state, myColor, oppColor);
             }
-            Action a = legal.get(random.nextInt(legal.size()));
+            Action a = chooseRolloutAction(state, legal, toMove, other);
             Color winner = MoveApplier.apply(state, a);
             if (a.isPlace()) {
                 boolean black = (toMove == Constants.BLACK_PLAYER);
@@ -237,6 +263,9 @@ public class MctsStrategy implements Strategy, RoundListener {
         int theirs = state.countTopPieces(oppDolmen);
         if (mine > theirs) return myColor;
         if (theirs > mine) return oppColor;
+        int eval = Evaluator.evaluate(state, myColor);
+        if (eval > 0) return myColor;
+        if (eval < 0) return oppColor;
         return null;
     }
 
@@ -272,17 +301,35 @@ public class MctsStrategy implements Strategy, RoundListener {
         return MoveGenerator.generateLegal(node.state, node.toMove, stones, caps, other, false);
     }
 
+    private List<Action> orderedActionsFor(MctsNode node) {
+        List<Action> legal = generateActionsFor(node);
+        Color other = opponentOf(node.toMove);
+        ArrayList<ScoredAction> scored = new ArrayList<>(legal.size());
+        for (Action action : legal) {
+            scored.add(new ScoredAction(action, actionScore(node.state, action, node.toMove, other)));
+        }
+        scored.sort(Comparator.comparingInt((ScoredAction sa) -> sa.score).reversed());
+
+        ArrayList<Action> ordered = new ArrayList<>(scored.size());
+        for (ScoredAction entry : scored) {
+            ordered.add(entry.action);
+        }
+        return ordered;
+    }
+
     private boolean isTerminal(MctsNode node) {
         return node.state.anyPathExists(Constants.BLACK_PLAYER)
                 || node.state.anyPathExists(Constants.WHITE_PLAYER);
     }
 
-    private MctsNode mostVisitedChild(MctsNode root) {
+    private MctsNode bestRootChild(MctsNode root) {
         MctsNode best = null;
-        int bestVisits = -1;
+        double bestValue = Double.NEGATIVE_INFINITY;
         for (MctsNode c : root.children) {
-            if (c.visits > bestVisits) {
-                bestVisits = c.visits;
+            double winRate = c.visits == 0 ? 0.0 : c.wins / c.visits;
+            double value = Math.sqrt(c.visits) + winRate;
+            if (value > bestValue) {
+                bestValue = value;
                 best = c;
             }
         }
@@ -324,6 +371,182 @@ public class MctsStrategy implements Strategy, RoundListener {
         int ws = iAmBlack ? opp.countStones()   : me.countStones();
         int wc = iAmBlack ? opp.countCapstones(): me.countCapstones();
         return new MctsNode(null, null, myColor, state, bs, bc, ws, wc);
+    }
+
+    private Action chooseRolloutAction(BoardState state, List<Action> legal, Color toMove, Color opponent) {
+        Action winNow = findWinningAction(state, legal, toMove);
+        if (winNow != null) return winNow;
+
+        if (random.nextDouble() < ROLLOUT_RANDOMNESS) {
+            return legal.get(random.nextInt(legal.size()));
+        }
+
+        int limit = Math.min(ROLLOUT_CANDIDATES, legal.size());
+        Action best = legal.get(0);
+        int bestScore = Integer.MIN_VALUE;
+        for (int i = 0; i < limit; i++) {
+            Action action = legal.get(random.nextInt(legal.size()));
+            int score = rolloutActionScore(state, action, toMove, opponent);
+            if (score > bestScore) {
+                bestScore = score;
+                best = action;
+            }
+        }
+        return best;
+    }
+
+    private int actionScore(BoardState state, Action action, Color toMove, Color opponent) {
+        BoardState next = new BoardState(state);
+        Color winner = MoveApplier.apply(next, action);
+        if (winner == toMove) return WIN_SCORE;
+        if (winner == opponent) return -WIN_SCORE;
+
+        int score = Evaluator.evaluate(next, toMove);
+        score += ROAD_WEIGHT * (bestRoadDistance(state, toMove) - bestRoadDistance(next, toMove));
+        score += ROAD_WEIGHT * (bestRoadDistance(next, opponent) - bestRoadDistance(state, opponent));
+
+        if (action.isPlace()) {
+            int center = state.getSize() / 2;
+            int distance = Math.abs(action.position.x - center) + Math.abs(action.position.y - center);
+            score += 60 - 10 * distance;
+            if (action.piece.isCapstone()) score += 35;
+            if (action.piece.isMenhir()) score += 20;
+        } else if (action.isMove()) {
+            score += 25 + 5 * state.stackHeight(action.position.y, action.position.x);
+        }
+        return score;
+    }
+
+    private int rolloutActionScore(BoardState state, Action action, Color toMove, Color opponent) {
+        BoardState next = new BoardState(state);
+        Color winner = MoveApplier.apply(next, action);
+        if (winner == toMove) return WIN_SCORE;
+        if (winner == opponent) return -WIN_SCORE;
+
+        int score = Evaluator.evaluate(next, toMove);
+        if (action.isPlace()) {
+            int center = state.getSize() / 2;
+            int distance = Math.abs(action.position.x - center) + Math.abs(action.position.y - center);
+            score += 45 - 8 * distance;
+            if (action.piece.isCapstone()) score += 30;
+            if (action.piece.isMenhir()) score += 15;
+        } else if (action.isMove()) {
+            score += 20 + 4 * state.stackHeight(action.position.y, action.position.x);
+        }
+        return score;
+    }
+
+    private Action findWinningAction(BoardState state, List<Action> legal, Color player) {
+        for (Action action : legal) {
+            BoardState next = new BoardState(state);
+            if (MoveApplier.apply(next, action) == player) {
+                return action;
+            }
+        }
+        return null;
+    }
+
+    private Action findBlockingAction(BoardState state, List<Action> legal, Color player, Color opponent,
+                                      int blackStones, int blackCaps, int whiteStones, int whiteCaps) {
+        int oppStones = opponent == Constants.BLACK_PLAYER ? blackStones : whiteStones;
+        int oppCaps = opponent == Constants.BLACK_PLAYER ? blackCaps : whiteCaps;
+        List<Action> opponentActions = MoveGenerator.generateLegal(state, opponent, oppStones, oppCaps, player, false);
+        if (findWinningAction(state, opponentActions, opponent) == null) {
+            return null;
+        }
+
+        Action bestBlock = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (Action action : legal) {
+            BoardState next = new BoardState(state);
+            Color winner = MoveApplier.apply(next, action);
+            if (winner == player) return action;
+
+            List<Action> replies = MoveGenerator.generateLegal(next, opponent, oppStones, oppCaps, player, false);
+            if (findWinningAction(next, replies, opponent) == null) {
+                int score = BLOCK_SCORE + actionScore(state, action, player, opponent);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestBlock = action;
+                }
+            }
+        }
+        return bestBlock;
+    }
+
+    private int bestRoadDistance(BoardState state, Color color) {
+        return Math.min(roadDistance(state, color, true), roadDistance(state, color, false));
+    }
+
+    private int roadDistance(BoardState state, Color color, boolean vertical) {
+        int size = state.getSize();
+        int[][] dist = new int[size][size];
+        boolean[][] visited = new boolean[size][size];
+        for (int row = 0; row < size; row++) {
+            for (int col = 0; col < size; col++) {
+                dist[row][col] = 1_000_000;
+            }
+        }
+
+        for (int i = 0; i < size; i++) {
+            int row = vertical ? 0 : i;
+            int col = vertical ? i : 0;
+            dist[row][col] = cellCost(state, color, row, col);
+        }
+
+        for (int step = 0; step < size * size; step++) {
+            int bestRow = -1;
+            int bestCol = -1;
+            int best = 1_000_000;
+            for (int row = 0; row < size; row++) {
+                for (int col = 0; col < size; col++) {
+                    if (!visited[row][col] && dist[row][col] < best) {
+                        best = dist[row][col];
+                        bestRow = row;
+                        bestCol = col;
+                    }
+                }
+            }
+            if (bestRow < 0) break;
+            visited[bestRow][bestCol] = true;
+            relax(state, color, dist, visited, bestRow, bestCol, bestRow + 1, bestCol);
+            relax(state, color, dist, visited, bestRow, bestCol, bestRow - 1, bestCol);
+            relax(state, color, dist, visited, bestRow, bestCol, bestRow, bestCol + 1);
+            relax(state, color, dist, visited, bestRow, bestCol, bestRow, bestCol - 1);
+        }
+
+        int target = 1_000_000;
+        for (int i = 0; i < size; i++) {
+            int row = vertical ? size - 1 : i;
+            int col = vertical ? i : size - 1;
+            target = Math.min(target, dist[row][col]);
+        }
+        return Math.min(target, size + 4);
+    }
+
+    private void relax(BoardState state, Color color, int[][] dist, boolean[][] visited,
+                       int fromRow, int fromCol, int toRow, int toCol) {
+        if (!state.inBounds(toRow, toCol) || visited[toRow][toCol]) return;
+        int next = dist[fromRow][fromCol] + cellCost(state, color, toRow, toCol);
+        if (next < dist[toRow][toCol]) {
+            dist[toRow][toCol] = next;
+        }
+    }
+
+    private int cellCost(BoardState state, Color color, int row, int col) {
+        if (state.isFree(row, col)) return 1;
+        Piece top = state.getTop(row, col);
+        if (top.color == color) return top.isMenhir() ? 3 : 0;
+        return top.isMenhir() ? 2 : 5;
+    }
+
+    private Color opponentOf(Color color) {
+        return color == Constants.BLACK_PLAYER ? Constants.WHITE_PLAYER : Constants.BLACK_PLAYER;
+    }
+
+    private void resetTree() {
+        lastRoot = null;
+        lastOurAction = null;
     }
 
     /** Comparaison structurelle de deux Actions (Action n'override pas equals). */
@@ -409,6 +632,16 @@ public class MctsStrategy implements Strategy, RoundListener {
             this.blackCapstones = bc;
             this.whiteStones = ws;
             this.whiteCapstones = wc;
+        }
+    }
+
+    private static final class ScoredAction {
+        final Action action;
+        final int score;
+
+        ScoredAction(Action action, int score) {
+            this.action = action;
+            this.score = score;
         }
     }
 }
