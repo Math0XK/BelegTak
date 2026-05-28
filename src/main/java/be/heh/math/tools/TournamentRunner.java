@@ -11,6 +11,7 @@ import be.belegkarnil.game.board.tak.event.MisdesignEvent;
 import be.belegkarnil.game.board.tak.event.MisdesignListener;
 import be.belegkarnil.game.board.tak.strategy.RandomStrategy;
 import be.belegkarnil.game.board.tak.strategy.Strategy;
+import be.heh.math.ChampionStrategy;
 import be.heh.math.GreedyStrategy;
 import be.heh.math.MctsStrategy;
 import be.heh.math.NaiveStrategy;
@@ -43,10 +44,10 @@ public class TournamentRunner {
     public static void main(String[] args) throws Exception {
         // === Parsing arguments avec valeurs par défaut ===
         String classA      = args.length > 0 ? args[0] : ReflexStrategy.class.getName();
-        String classB      = args.length > 1 ? args[1] : MctsStrategy.class.getName();
+        String classB      = args.length > 1 ? args[1] : ChampionStrategy.class.getName();
         Board.Size size    = args.length > 2 ? Board.Size.valueOf(args[2]) : Board.Size.MEDIUM;
-        int numGames       = args.length > 3 ? Integer.parseInt(args[3]) : 100;
-        int timeoutSec     = args.length > 4 ? Integer.parseInt(args[4]) : 6;
+        int numGames       = args.length > 3 ? Integer.parseInt(args[3]) : 10;
+        int timeoutSec     = args.length > 4 ? Integer.parseInt(args[4]) : 60;
 
         @SuppressWarnings("unchecked")
         Class<? extends Strategy> klassA = (Class<? extends Strategy>) Class.forName(classA);

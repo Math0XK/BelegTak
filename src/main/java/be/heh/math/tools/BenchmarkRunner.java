@@ -46,8 +46,8 @@ public class BenchmarkRunner {
         // === Parse arguments ===
         String challengerName = args.length > 0 ? args[0]
                 : ReflexStrategy.class.getName();
-        int    gamesPerMatch  = args.length > 1 ? Integer.parseInt(args[1]) : 50;
-        int    timeoutSec     = args.length > 2 ? Integer.parseInt(args[2]) : 30;
+        int    gamesPerMatch  = args.length > 1 ? Integer.parseInt(args[1]) : 2;
+        int    timeoutSec     = args.length > 2 ? Integer.parseInt(args[2]) : 60;
 
         List<Board.Size> sizes = new ArrayList<>();
         if (args.length > 3) {

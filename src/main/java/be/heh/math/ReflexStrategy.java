@@ -41,13 +41,15 @@ public class ReflexStrategy implements Strategy, RoundListener {
     static final int LOSS_PENALTY = -1_000_000;
     static final int BLOCK_BONUS  =      50_000;
 
-    static final int TIME_BUDGET_MS = 59_000; // 1s margin for move generation + overhead
+    static final int TIME_BUDGET_MS = 59_500; // 1s margin for move generation + overhead
 
     static final int MAX_DEPTH = 4;
 
     private boolean firstAction = false;
     private long deadline = 0L;
     private boolean timeUp = false;
+
+    private Action [][] killerMoves; // Pour stocker des moves suceptibles d'être bons à chaque profondeur (pour optimisation alpha-beta)
 
     public ReflexStrategy() {
     }
@@ -96,6 +98,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
     private Action chooseAction(Board board, Player myself, Player opponent, int maxDepth) {
 
         List<Action> legal = MoveGenerator.generateLegal(board, myself, opponent, false);
+        killerMoves = new Action[MAX_DEPTH + 1][];
 
         if(legal.isEmpty()) return new Action();
 
@@ -224,6 +227,36 @@ public class ReflexStrategy implements Strategy, RoundListener {
             }
             return value;
         }
+    }
+
+    private void storeKiller(int depth, Action a) {
+        if (killerMoves[depth][0] == a) return; // Already stored as best move for this depth
+        else {
+            killerMoves[depth][1] = killerMoves[depth][0]; // Demote previous best to second-best
+            killerMoves[depth][0] = a; // Store new best move for this depth
+        }
+    }
+
+    private List<Action> orderWithKillers(List<Action> legal, int depth) {
+        Action k0 = (depth >= 0 && depth < killerMoves.length) ? killerMoves[depth][0] : null;
+        Action k1 = (depth >= 0 && depth < killerMoves.length) ? killerMoves[depth][1] : null;
+        
+        if(k0 == null && k1 == null) return legal; // No killer moves for this depth, return original order
+
+        List<Action> head = new ArrayList<>();
+        List<Action> tail = new ArrayList<>();
+
+        for(Action a : legal) {
+            if(a == k0 && head.get(0) != k0) head.set(0, a);
+            else if(a == k1 && head.get(0) != k1) {
+                if(head.get(0) != k0) head.set(0, a);
+                else head.set(1, a);
+            }
+            else tail.add(a);
+        }
+
+        head.addAll(tail);
+        return head;
     }
 
     @Override
