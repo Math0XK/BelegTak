@@ -9,7 +9,7 @@ import be.belegkarnil.game.board.tak.Player;
 import be.belegkarnil.game.board.tak.event.RoundEvent;
 import be.belegkarnil.game.board.tak.event.RoundListener;
 import be.belegkarnil.game.board.tak.strategy.Strategy;
-import be.heh.math.core.eval.Evaluator;
+import be.heh.math.core.eval.EvaluatorV2;
 import be.heh.math.core.move.MoveApplier;
 import be.heh.math.core.move.MoveGenerator;
 import be.heh.math.core.state.BoardState;
@@ -43,7 +43,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
     static final int TIME_BUDGET_MS = 59_500; // 1s margin for move generation + overhead
 
-    static final int MAX_DEPTH = 4;
+    static final int MAX_DEPTH = 6;
 
     private boolean firstAction = false;
     private long deadline = 0L;
@@ -63,27 +63,33 @@ public class ReflexStrategy implements Strategy, RoundListener {
         timeUp = false;
         if (firstAction) {
             firstAction = false;
-            return placeOpponentDolmenNearCenter(board, opponent);
+            return smartFirstAction(board, opponent);
         }
 
         return chooseAction(board, myself, opponent, MAX_DEPTH);
 
     }
 
-    private Action placeOpponentDolmenNearCenter(Board board, Player opponent) {
+    private Action smartFirstAction(Board board, Player opponent) {
         Piece dolmen = (opponent.getColor() == Constants.BLACK_PLAYER)
                 ? Piece.DOLMEN_BLACK
                 : Piece.DOLMEN_WHITE;
         int size = board.getSize();
-        int center = size / 2;
-        if (board.isFree(center, center)) {
-            return new Action(dolmen, new Point(center, center));
+        Point[] candidates = new Point[] {
+                new Point(0, 0),
+                new Point(size - 1, size - 1),
+                new Point(0, size - 1),
+                new Point(size - 1, 0)
+        };
+        int selectedIndex = Math.abs(board.hashCode()) % 4;
+        if(board.isFree(candidates[selectedIndex].x, candidates[selectedIndex].y)) {
+            return new Action(dolmen, candidates[selectedIndex]);
         }
-        for (int row = 0; row < size; row++) {
-            for (int col = 0; col < size; col++) {
-                if (board.isFree(row, col)) {
-                    return new Action(dolmen, new Point(col, row));
-                }
+         // Si la position choisie est occupée (peu probable), choisir la suivante disponible dans la liste
+        for(int i = 1; i < candidates.length; i++) {
+            int idx = (selectedIndex + i) % candidates.length;
+            if(board.isFree(candidates[idx].x, candidates[idx].y)) {
+                return new Action(dolmen, candidates[idx]);
             }
         }
         return new Action();
@@ -182,7 +188,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
         if(timeUp()) {
             timeUp = true;
-            return Evaluator.evaluate(sim, myColor);
+            return EvaluatorV2.evaluate(sim, myColor);
         }
 
         long hash = hashPosition(sim, maximizing, myStones, myCaps, oppStones, oppCaps);
@@ -200,7 +206,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
         }
 
         if (depth <= 0) {
-            int value = Evaluator.evaluate(sim, myColor);
+            int value = EvaluatorV2.evaluate(sim, myColor);
             storeTT(ttIndex, hash, value, depth, Bound.TYPE_EXACT, ttMove);
             return value;
         }
@@ -211,7 +217,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
         int currentCaps = maximizing ? myCaps : oppCaps;
 
         List<Action> legal = MoveGenerator.generateLegal(sim, currentPlayer, currentStones, currentCaps, opponentPlayer, false);
-        if (legal.isEmpty() || System.currentTimeMillis() > deadline) return Evaluator.evaluate(sim, myColor);
+        if (legal.isEmpty() || System.currentTimeMillis() > deadline) return EvaluatorV2.evaluate(sim, myColor);
         
         List<Action> ordered = orderWithKillersAndTT(legal, depth, ttMove);
         Action bestLocalAction = null;

@@ -10,7 +10,7 @@ import java.util.LinkedList;
 import java.util.PriorityQueue;
 import java.util.Queue;
 
-public final class Evaluator {
+public final class EvaluatorV2 {
 
     public static final int WIN_BONUS = 100_000;
     public static final int W_COMPONENT = 100;
@@ -22,7 +22,7 @@ public final class Evaluator {
     public static final int W_CAPSTONE_ON_BOARD = 25;
     public static final int W_ROAD = 2000;
 
-    private Evaluator() {
+    private EvaluatorV2() {
     }
 
     public static int evaluate(BoardState board, Player me, Player opponent) {
