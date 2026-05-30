@@ -43,7 +43,51 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
     static final int TIME_BUDGET_MS = 59_500; // 1s margin for move generation + overhead
 
-    static final int MAX_DEPTH = 6;
+    static final int MAX_DEPTH = 15;
+
+    static final int TT_BITS = 26; // 64-bit hash, 2^26 entries = 512MB if each entry is 16 bytes
+
+    // ========================================================================
+    // DEBUG INSTRUMENTATION
+    //   Mettre DEBUG = true pour activer compteurs + chronos par tour.
+    //   Quand DEBUG = false, l'overhead est nul (JIT élimine les blocs).
+    // ========================================================================
+    public static boolean DEBUG = true;
+
+    // Compteurs (par tour de plays)
+    private long statAlphaBetaCalls;
+    private long statTTLookups;
+    private long statTTHashHits;
+    private long statTTCutoffs;
+    private long statTTStores;
+    private long statKillerHits;
+    private long statTTMoveHits;
+    private long statLeafEvals;
+    private long statWinShortCircuits;
+    private long statLossSkips;
+    private long statMoveGenCalls;
+    private long statApplyCalls;
+    private long statEvalCalls;
+
+    // Chronos en nanosecondes (par tour)
+    private long nsEvaluator;
+    private long nsMoveGenerator;
+    private long nsMoveApplier;
+    private long nsTTLookup;
+    private long nsTTStore;
+    private long nsHashPosition;
+    private long nsOrderWithKillers;
+
+    // Stats par profondeur d'iterative deepening
+    private long[] statDepthCompleted;
+    private int[] statDepthBestScore;
+    private int statDeepestCompleted;
+    private long debugStartMs;
+    // ========================================================================
+    // 
+    //  Fin de la section de DEBUG INSTRUMENTATION
+    // 
+    // ========================================================================
 
     private boolean firstAction = false;
     private long deadline = 0L;
@@ -106,20 +150,29 @@ public class ReflexStrategy implements Strategy, RoundListener {
 
     private Action chooseAction(Board board, Player myself, Player opponent, int maxDepth) {
 
+        if (DEBUG) resetDebugStats(maxDepth);
+
+        long t0 = DEBUG ? System.nanoTime() : 0;
         List<Action> legal = MoveGenerator.generateLegal(board, myself, opponent, false);
+        if (DEBUG) { nsMoveGenerator += System.nanoTime() - t0; statMoveGenCalls++; }
+
         killerMoves = new Action[MAX_DEPTH + 2][2];
 
         if (tt == null) {
-            tt = new TTEntry[1 << 20];
-            ttMask = (1 << 20) - 1;
+            tt = new TTEntry[1 << TT_BITS];
+            ttMask = (1 << TT_BITS) - 1;
         }
 
-        if(legal.isEmpty()) return new Action();
+        if(legal.isEmpty()) {
+            if (DEBUG) printDebugStats(0);
+            return new Action();
+        }
 
         Color myColor = myself.getColor();
         Color oppColor = opponent.getColor();
 
         Action bestAction = legal.get(0);
+        int bestRootScore = Integer.MIN_VALUE;
         BoardState rootSim = new BoardState(board);
 
         for (int depth = 1; depth <= maxDepth; depth++) {
@@ -131,7 +184,10 @@ public class ReflexStrategy implements Strategy, RoundListener {
             int beta = Integer.MAX_VALUE;
             boolean completedDepth = true;
 
+            long tOrd = DEBUG ? System.nanoTime() : 0;
             List<Action> ordered = orderWithKillersAndTT(legal, depth, null);
+            if (DEBUG) nsOrderWithKillers += System.nanoTime() - tOrd;
+
             int prevBestIdx = ordered.indexOf(bestAction);
 
             if (prevBestIdx > 0) {
@@ -139,7 +195,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
                 Action prevBest = ordered.remove(prevBestIdx);
                 ordered.add(0, prevBest);
             }
-            
+
             for (Action a : ordered) {
                 if (System.currentTimeMillis() > deadline) {
                     timeUp = true;
@@ -147,9 +203,17 @@ public class ReflexStrategy implements Strategy, RoundListener {
                     break;
                 }
                 BoardState sim = new BoardState(rootSim);
+                long tApp = DEBUG ? System.nanoTime() : 0;
                 Color winnerAfterA = MoveApplier.apply(sim, a);
-                if(winnerAfterA == myColor) return a;
-                if (winnerAfterA == oppColor) continue;
+                if (DEBUG) { nsMoveApplier += System.nanoTime() - tApp; statApplyCalls++; }
+                if(winnerAfterA == myColor) {
+                    if (DEBUG) { statWinShortCircuits++; printDebugStats(depth); }
+                    return a;
+                }
+                if (winnerAfterA == oppColor) {
+                    if (DEBUG) statLossSkips++;
+                    continue;
+                }
 
                 int nMyS = myself.countStones(), nMyC = myself.countCapstones();
                 if(a.isPlace()) {
@@ -175,39 +239,71 @@ public class ReflexStrategy implements Strategy, RoundListener {
             }
             if(completedDepth && depthBest != null) {
                 bestAction = depthBest;
+                bestRootScore = depthBestScore;
+                if (DEBUG) {
+                    statDepthCompleted[depth] = 1;
+                    statDepthBestScore[depth] = depthBestScore;
+                    statDeepestCompleted = depth;
+                }
             }
         }
+        if (DEBUG) printDebugStats(bestRootScore);
         return bestAction;
     }
 
-    private int alphaBeta(BoardState sim, int depth, int alpha, int beta, boolean maximizing, 
-                            Color myColor, Color oppColor, 
-                            int myStones, int myCaps, 
+    private int alphaBeta(BoardState sim, int depth, int alpha, int beta, boolean maximizing,
+                            Color myColor, Color oppColor,
+                            int myStones, int myCaps,
                             int oppStones, int oppCaps,
                             long deadline) {
 
+        if (DEBUG) statAlphaBetaCalls++;
+
         if(timeUp()) {
             timeUp = true;
-            return EvaluatorV2.evaluate(sim, myColor);
+            long t = DEBUG ? System.nanoTime() : 0;
+            int v = EvaluatorV2.evaluate(sim, myColor);
+            if (DEBUG) { nsEvaluator += System.nanoTime() - t; statEvalCalls++; }
+            return v;
         }
 
+        long tHash = DEBUG ? System.nanoTime() : 0;
         long hash = hashPosition(sim, maximizing, myStones, myCaps, oppStones, oppCaps);
+        if (DEBUG) nsHashPosition += System.nanoTime() - tHash;
+
+        long tLookup = DEBUG ? System.nanoTime() : 0;
         int ttIndex = (int) (hash & ttMask);
         TTEntry entry = tt[ttIndex];
         Action ttMove = null;
         int originalAlpha = alpha;
+        if (DEBUG) statTTLookups++;
         if (entry != null && entry.hash == hash) {
+            if (DEBUG) statTTHashHits++;
             ttMove = entry.bestMove;
             if (entry.depth >= depth) {
-                if (entry.type == Bound.TYPE_EXACT) return entry.value;
-                if (entry.type == Bound.TYPE_LOWER && entry.value >= beta) return entry.value;
-                if (entry.type == Bound.TYPE_UPPER && entry.value <= alpha) return entry.value;
+                if (entry.type == Bound.TYPE_EXACT) {
+                    if (DEBUG) { statTTCutoffs++; nsTTLookup += System.nanoTime() - tLookup; }
+                    return entry.value;
+                }
+                if (entry.type == Bound.TYPE_LOWER && entry.value >= beta) {
+                    if (DEBUG) { statTTCutoffs++; nsTTLookup += System.nanoTime() - tLookup; }
+                    return entry.value;
+                }
+                if (entry.type == Bound.TYPE_UPPER && entry.value <= alpha) {
+                    if (DEBUG) { statTTCutoffs++; nsTTLookup += System.nanoTime() - tLookup; }
+                    return entry.value;
+                }
             }
         }
+        if (DEBUG) nsTTLookup += System.nanoTime() - tLookup;
 
         if (depth <= 0) {
+            long tEval = DEBUG ? System.nanoTime() : 0;
             int value = EvaluatorV2.evaluate(sim, myColor);
+            if (DEBUG) { nsEvaluator += System.nanoTime() - tEval; statEvalCalls++; statLeafEvals++; }
+            long tStore = DEBUG ? System.nanoTime() : 0;
             storeTT(ttIndex, hash, value, depth, Bound.TYPE_EXACT, ttMove);
+            if (DEBUG) { nsTTStore += System.nanoTime() - tStore; statTTStores++; }
             return value;
         }
 
@@ -216,10 +312,20 @@ public class ReflexStrategy implements Strategy, RoundListener {
         int currentStones = maximizing ? myStones : oppStones;
         int currentCaps = maximizing ? myCaps : oppCaps;
 
+        long tGen = DEBUG ? System.nanoTime() : 0;
         List<Action> legal = MoveGenerator.generateLegal(sim, currentPlayer, currentStones, currentCaps, opponentPlayer, false);
-        if (legal.isEmpty() || System.currentTimeMillis() > deadline) return EvaluatorV2.evaluate(sim, myColor);
-        
+        if (DEBUG) { nsMoveGenerator += System.nanoTime() - tGen; statMoveGenCalls++; }
+
+        if (legal.isEmpty() || System.currentTimeMillis() > deadline) {
+            long tE = DEBUG ? System.nanoTime() : 0;
+            int v = EvaluatorV2.evaluate(sim, myColor);
+            if (DEBUG) { nsEvaluator += System.nanoTime() - tE; statEvalCalls++; }
+            return v;
+        }
+
+        long tOrd = DEBUG ? System.nanoTime() : 0;
         List<Action> ordered = orderWithKillersAndTT(legal, depth, ttMove);
+        if (DEBUG) nsOrderWithKillers += System.nanoTime() - tOrd;
         Action bestLocalAction = null;
 
         if(maximizing) {
@@ -231,15 +337,21 @@ public class ReflexStrategy implements Strategy, RoundListener {
                 }
 
                 BoardState next = new BoardState(sim);
+                long tApp = DEBUG ? System.nanoTime() : 0;
                 Color winnerAfterA = MoveApplier.apply(next, a);
+                if (DEBUG) { nsMoveApplier += System.nanoTime() - tApp; statApplyCalls++; }
                 if(winnerAfterA == myColor) {
                     int win = WIN_REWARD - (MAX_DEPTH - depth);
+                    long tS = DEBUG ? System.nanoTime() : 0;
                     storeTT(ttIndex, hash, win, depth, Bound.TYPE_EXACT, a);
+                    if (DEBUG) { nsTTStore += System.nanoTime() - tS; statTTStores++; statWinShortCircuits++; }
                     return win;
                 }
                 if(winnerAfterA == oppColor) {
                     int loss = LOSS_PENALTY + (MAX_DEPTH - depth);
+                    long tS = DEBUG ? System.nanoTime() : 0;
                     storeTT(ttIndex, hash, loss, depth, Bound.TYPE_EXACT, a);
+                    if (DEBUG) { nsTTStore += System.nanoTime() - tS; statTTStores++; statLossSkips++; }
                     continue;
                 };
 
@@ -250,7 +362,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
                 }
 
                 int childValue = alphaBeta(next, depth - 1, alpha, beta, false, myColor, oppColor, nMyS, nMyC, oppStones, oppCaps, deadline);
-                
+
                 if(childValue > value) {
                     value = childValue;
                     bestLocalAction = a;
@@ -261,11 +373,13 @@ public class ReflexStrategy implements Strategy, RoundListener {
                     break; // beta cut-off
                 }
             }
-            
+
             byte type = Bound.TYPE_EXACT;
             if (value <= originalAlpha) type = Bound.TYPE_UPPER;
             else if (value >= beta) type = Bound.TYPE_LOWER;
+            long tS = DEBUG ? System.nanoTime() : 0;
             storeTT(ttIndex, hash, value, depth, type, bestLocalAction);
+            if (DEBUG) { nsTTStore += System.nanoTime() - tS; statTTStores++; }
             return value;
         }
         else {
@@ -276,15 +390,21 @@ public class ReflexStrategy implements Strategy, RoundListener {
                     break;
                 }
                 BoardState next = new BoardState(sim);
+                long tApp = DEBUG ? System.nanoTime() : 0;
                 Color winnerAfterA = MoveApplier.apply(next, a);
+                if (DEBUG) { nsMoveApplier += System.nanoTime() - tApp; statApplyCalls++; }
                 if(winnerAfterA == oppColor) {
                     int loss = LOSS_PENALTY + (MAX_DEPTH - depth);
+                    long tS2 = DEBUG ? System.nanoTime() : 0;
                     storeTT(ttIndex, hash, loss, depth, Bound.TYPE_EXACT, a);
-                    return loss; 
+                    if (DEBUG) { nsTTStore += System.nanoTime() - tS2; statTTStores++; statLossSkips++; }
+                    return loss;
                 }
                 if(winnerAfterA == myColor) {
                     int win = WIN_REWARD - (MAX_DEPTH - depth);
+                    long tS2 = DEBUG ? System.nanoTime() : 0;
                     storeTT(ttIndex, hash, win, depth, Bound.TYPE_EXACT, a);
+                    if (DEBUG) { nsTTStore += System.nanoTime() - tS2; statTTStores++; statWinShortCircuits++; }
                     continue;
                 }
 
@@ -295,7 +415,7 @@ public class ReflexStrategy implements Strategy, RoundListener {
                 }
 
                 int childValue = alphaBeta(next, depth - 1, alpha, beta, true, myColor, oppColor, myStones, myCaps, nOppS, nOppC, deadline);
-                
+
                 if(childValue < value) {
                     value = childValue;
                     bestLocalAction = a;
@@ -306,11 +426,13 @@ public class ReflexStrategy implements Strategy, RoundListener {
                     break; // alpha cut-off
                 }
             }
-            
+
             byte type = Bound.TYPE_EXACT;
             if (value <= originalAlpha) type = Bound.TYPE_UPPER;
             else if (value >= beta) type = Bound.TYPE_LOWER;
+            long tS3 = DEBUG ? System.nanoTime() : 0;
             storeTT(ttIndex, hash, value, depth, type, bestLocalAction);
+            if (DEBUG) { nsTTStore += System.nanoTime() - tS3; statTTStores++; }
             return value;
         }
     }
@@ -351,6 +473,11 @@ public class ReflexStrategy implements Strategy, RoundListener {
                 }
             }
             else tail.add(a);
+        }
+        if (DEBUG) {
+            if (foundTT) statTTMoveHits++;
+            if (foundK0) statKillerHits++;
+            if (foundK1) statKillerHits++;
         }
         head.addAll(tail);
         return head;
@@ -441,5 +568,103 @@ public class ReflexStrategy implements Strategy, RoundListener {
         static final byte TYPE_EXACT = 0;
         static final byte TYPE_LOWER = 1;
         static final byte TYPE_UPPER = 2;
+    }
+
+    // ========================================================================
+    // DEBUG : reset/print stats
+    // ========================================================================
+    private void resetDebugStats(int maxDepth) {
+        statAlphaBetaCalls = 0L;
+        statTTLookups = 0L;
+        statTTHashHits = 0L;
+        statTTCutoffs = 0L;
+        statTTStores = 0L;
+        statKillerHits = 0L;
+        statTTMoveHits = 0L;
+        statLeafEvals = 0L;
+        statWinShortCircuits = 0L;
+        statLossSkips = 0L;
+        statMoveGenCalls = 0L;
+        statApplyCalls = 0L;
+        statEvalCalls = 0L;
+        nsEvaluator = 0L;
+        nsMoveGenerator = 0L;
+        nsMoveApplier = 0L;
+        nsTTLookup = 0L;
+        nsTTStore = 0L;
+        nsHashPosition = 0L;
+        nsOrderWithKillers = 0L;
+        statDepthCompleted = new long[maxDepth + 2];
+        statDepthBestScore = new int[maxDepth + 2];
+        Arrays.fill(statDepthBestScore, Integer.MIN_VALUE);
+        statDeepestCompleted = 0;
+        debugStartMs = System.currentTimeMillis();
+    }
+
+    private void printDebugStats(int finalScore) {
+        long totalMs = System.currentTimeMillis() - debugStartMs;
+        long safeTotal = Math.max(1, totalMs);
+        long instrumentedMs =
+                (nsEvaluator + nsMoveGenerator + nsMoveApplier
+                 + nsTTLookup + nsTTStore + nsHashPosition + nsOrderWithKillers) / 1_000_000L;
+        long otherMs = Math.max(0L, totalMs - instrumentedMs);
+
+        StringBuilder sb = new StringBuilder(2048);
+        sb.append('\n');
+        sb.append("======================== ReflexStrategy DEBUG ========================\n");
+        sb.append(String.format("  Tour total            : %6d ms  (budget = %d ms)%n", totalMs, TIME_BUDGET_MS));
+        sb.append(String.format("  Profondeur atteinte   : %d / %d%n", statDeepestCompleted, MAX_DEPTH));
+        sb.append(String.format("  Score final racine    : %d%n", finalScore));
+        sb.append('\n');
+        sb.append("  === Compteurs ===\n");
+        sb.append(String.format("    alphaBeta calls         : %,15d%n", statAlphaBetaCalls));
+        sb.append(String.format("    leaf evals (depth=0)    : %,15d%n", statLeafEvals));
+        sb.append(String.format("    EvaluatorV2 calls       : %,15d%n", statEvalCalls));
+        sb.append(String.format("    MoveGenerator calls     : %,15d%n", statMoveGenCalls));
+        sb.append(String.format("    MoveApplier calls       : %,15d%n", statApplyCalls));
+        sb.append(String.format("    win short-circuits      : %,15d%n", statWinShortCircuits));
+        sb.append(String.format("    loss skips              : %,15d%n", statLossSkips));
+        sb.append('\n');
+        sb.append("  === Transposition Table ===\n");
+        long hitPct    = statTTLookups   == 0 ? 0 : (100L * statTTHashHits / statTTLookups);
+        long cutoffPct = statTTHashHits  == 0 ? 0 : (100L * statTTCutoffs  / statTTHashHits);
+        sb.append(String.format("    TT lookups              : %,15d%n", statTTLookups));
+        sb.append(String.format("    TT hash hits            : %,15d   (%d%% lookups)%n", statTTHashHits, hitPct));
+        sb.append(String.format("    TT cutoffs              : %,15d   (%d%% hits)%n", statTTCutoffs, cutoffPct));
+        sb.append(String.format("    TT stores               : %,15d%n", statTTStores));
+        sb.append('\n');
+        sb.append("  === Move ordering ===\n");
+        sb.append(String.format("    TT bestMove hits        : %,15d%n", statTTMoveHits));
+        sb.append(String.format("    Killer hits             : %,15d%n", statKillerHits));
+        sb.append('\n');
+        sb.append("  === Temps cumulés (ms / %) ===\n");
+        sb.append(String.format("    EvaluatorV2.evaluate    : %6d ms  (%5.1f%%)%n",
+                nsEvaluator / 1_000_000L, 100.0 * nsEvaluator / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    MoveGenerator           : %6d ms  (%5.1f%%)%n",
+                nsMoveGenerator / 1_000_000L, 100.0 * nsMoveGenerator / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    MoveApplier.apply       : %6d ms  (%5.1f%%)%n",
+                nsMoveApplier / 1_000_000L, 100.0 * nsMoveApplier / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    hashPosition            : %6d ms  (%5.1f%%)%n",
+                nsHashPosition / 1_000_000L, 100.0 * nsHashPosition / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    TT lookup               : %6d ms  (%5.1f%%)%n",
+                nsTTLookup / 1_000_000L, 100.0 * nsTTLookup / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    TT store                : %6d ms  (%5.1f%%)%n",
+                nsTTStore / 1_000_000L, 100.0 * nsTTStore / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    orderWithKillersAndTT   : %6d ms  (%5.1f%%)%n",
+                nsOrderWithKillers / 1_000_000L, 100.0 * nsOrderWithKillers / 1_000_000.0 / safeTotal));
+        sb.append(String.format("    autre (recursion + GC)  : %6d ms  (%5.1f%%)%n",
+                otherMs, 100.0 * otherMs / safeTotal));
+        sb.append('\n');
+        sb.append("  === Iterative deepening (profondeurs complétées) ===\n");
+        if (statDepthCompleted != null) {
+            for (int d = 1; d < statDepthCompleted.length; d++) {
+                if (statDepthCompleted[d] > 0) {
+                    sb.append(String.format("    depth %d : bestScore=%d%n", d, statDepthBestScore[d]));
+                }
+            }
+        }
+        sb.append("======================================================================\n");
+        System.out.print(sb);
+        System.out.flush();
     }
 }

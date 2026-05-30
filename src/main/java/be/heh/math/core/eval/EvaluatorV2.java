@@ -17,8 +17,8 @@ public final class EvaluatorV2 {
     public static final int W_SPREAD = 80;
     public static final int W_DOLMEN_TOP = 30;
     public static final int W_CAPSTONE_HAND = 20;
-    public static final int W_TILE_CONTROL = 8;
-    public static final int W_CENTER_BONUS = 2;
+    public static final int W_TILE_CONTROL = 80;
+    public static final int W_CENTER_BONUS = 20;
     public static final int W_CAPSTONE_ON_BOARD = 25;
     public static final int W_ROAD = 2000;
 

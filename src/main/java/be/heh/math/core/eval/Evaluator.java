@@ -47,99 +47,8 @@ public final class Evaluator {
         Piece opponentDolmen = dolmenOf(opponentColor);
         score += W_DOLMEN_TOP * (board.countTopPieces(myDolmen) - board.countTopPieces(opponentDolmen));
         score += boardControlScore(board, myColor, opponentColor);
-        score += pathScore(board, myColor, opponentColor);
         return score;
     }
-
-    private static int cellCostFor(BoardState board, Color color, int row, int col) {
-        if (board.isFree(row, col)) return 1;
-        Piece top = board.getTop(row, col);
-        if (top.color == color) {
-            return top.isMenhir() ? 3 : 0;
-        }
-        else {
-            if (top.isMenhir()) return 999;
-            return top.isCapstone() ? 999 : 3;
-        }
-    }
-
-    private static int shortestPathToWin(BoardState board, Color me, Color opp, boolean horizontal) {
-        int size = board.getSize();
-        int[][] dist = new int[size][size];
-        boolean[][] visited = new boolean[size][size];
-
-        for (int i = 0; i < size; i++) {
-            for (int j = 0; j < size; j++) {
-                dist[i][j] = Integer.MAX_VALUE;
-            }
-        }
-
-        PriorityQueue<int[]> pq = new PriorityQueue<>((a, b) -> Integer.compare(a[0], b[0]));
-
-        if(horizontal) {
-            for (int row = 0; row < size; row++) {
-                int cost = cellCostFor(board, me, row, 0);
-                if(cost < 999) {
-                    dist[row][0] = cost;
-                    pq.add(new int[]{cost, row, 0});
-                }
-            }
-        } else {
-            for (int col = 0; col < size; col++) {
-                int cost = cellCostFor(board, me, 0, col);
-                if(cost < 999) {
-                    dist[0][col] = cost;
-                    pq.add(new int[]{cost, 0, col});
-                }
-            }
-        }
-
-        while(!pq.isEmpty()) {
-            int[] entry = pq.poll();
-            int d = entry[0];
-            int r = entry[1];
-            int c = entry[2];
-
-            if (visited[r][c]) continue;
-            visited[r][c] = true;
-
-            if (horizontal && c == size - 1) return d;
-            if (!horizontal && r == size - 1) return d;
-
-            for (int[] dir : DIRECTIONS) {
-                int nr = r + dir[0];
-                int nc = c + dir[1];
-                
-                if(!board.inBounds(nr, nc) || visited[nr][nc]) continue;
-                
-                int stepCost = cellCostFor(board, me, nr, nc);
-                if(stepCost == 999) continue;
-
-                int newDist = d + stepCost;
-                if(newDist < dist[nr][nc]) {
-                    dist[nr][nc] = newDist;
-                    pq.add(new int[]{newDist, nr, nc});
-                }
-            }
-        }
-        return Integer.MAX_VALUE; // No path found
-    }
-
-    private static int pathScore(BoardState board, Color myColor, Color opponentColor) {
-        int myHorizontal = shortestPathToWin(board, myColor, opponentColor, true);
-        int myVertical = shortestPathToWin(board, myColor, opponentColor, false);
-        int oppHorizontal = shortestPathToWin(board, opponentColor, myColor, true);
-        int oppVertical = shortestPathToWin(board, opponentColor, myColor, false);
-
-        int myBest = Math.min(myHorizontal, myVertical);
-        int oppBest = Math.min(oppHorizontal, oppVertical);
-
-        if (myBest == Integer.MAX_VALUE) return -WIN_BONUS;
-        if (oppBest == Integer.MAX_VALUE) return WIN_BONUS;
-
-        return W_ROAD * (oppBest - myBest);
-    }
-    
 
     private static int boardControlScore(BoardState board, Color myColor, Color opponentColor) {
         int score = 0;
@@ -255,11 +164,4 @@ public final class Evaluator {
             this.spread = spread;
         }
     }
-
-    private static final int[][] DIRECTIONS = {
-        {1, 0},
-        {-1, 0},
-        {0, 1},
-        {0, -1}
-    };
 }

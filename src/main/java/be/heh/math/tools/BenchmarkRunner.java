@@ -85,15 +85,15 @@ public class BenchmarkRunner {
 
     public static void main(String[] args) throws Exception {
         // === Parse arguments ===
-        String  mode          = args.length > 0 ? args[0] : "ROBIN";
-        int     gamesPerPair  = args.length > 1 ? Integer.parseInt(args[1]) : 5;
+        String  mode          = args.length > 0 ? args[0] : ReflexStrategy.class.getName();
+        int     gamesPerPair  = args.length > 1 ? Integer.parseInt(args[1]) : 10;
         int     timeoutSec    = args.length > 2 ? Integer.parseInt(args[2]) : 60;
 
         List<Board.Size> sizes = new ArrayList<>();
         if (args.length > 3) {
             for (int i = 3; i < args.length; i++) sizes.add(Board.Size.valueOf(args[i]));
         } else {
-            sizes.add(Board.Size.HUGE);
+            sizes.add(Board.Size.SMALL);
         }
 
         if (mode.equalsIgnoreCase("ALL") || mode.equalsIgnoreCase("ROBIN")) {
